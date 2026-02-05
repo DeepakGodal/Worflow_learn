@@ -7,9 +7,10 @@ CREATE OR REPLACE TABLE SALES_RAW (
   UNIT_PRICE             NUMBER(10,2),
   DISCOUNT               NUMBER(5,2),
   SALES_TIMESTAMP        TIMESTAMP_NTZ,
-  -- Ingestion metadata
+  -- Ingestion metadata columns
   _LOAD_TS               TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
   _SOURCE_FILE           STRING,
   _ROW_NUMBER            NUMBER
 );
+
 
