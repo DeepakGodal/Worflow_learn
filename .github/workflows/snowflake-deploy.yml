@@ -1,0 +1,50 @@
+name: Deploy Snowflake DDL
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  deploy_ddl:
+    runs-on: ubuntu-latest
+
+    env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+      SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+      SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+      SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Install Snowflake CLI (recommended modern CLI)
+      - name: Install Snowflake CLI
+        run: |
+          pipx install snowflake-cli-labs
+
+      # Write private key from GitHub Secret (base64) into a file
+      - name: Configure Snowflake private key
+        run: |
+          echo "${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}" | base64 -d > /tmp/sf_key.p8
+          chmod 600 /tmp/sf_key.p8
+
+      # Execute SQL files (DDL) in order
+      - name: Deploy DDL scripts
+        run: |
+          echo "Running DDL scripts..."
+          for f in $(ls -1 *.sql | sort); do
+            echo "Executing $f"
+            snow sql \
+              --account "$SNOWFLAKE_ACCOUNT" \
+              --user "$SNOWFLAKE_USER" \
+              --role "$SNOWFLAKE_ROLE" \
+              --warehouse "$SNOWFLAKE_WAREHOUSE" \
+              --database "$SNOWFLAKE_DATABASE" \
+              --schema "$SNOWFLAKE_SCHEMA" \
+              --private-key-file /tmp/sf_key.p8 \
+              -f "$f"
+          done
