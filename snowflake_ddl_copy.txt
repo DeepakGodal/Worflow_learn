@@ -1,0 +1,370 @@
+-- =========================================================
+-- 00) (Optional) Warehouse for ingestion & transforms
+-- =========================================================
+CREATE OR REPLACE WAREHOUSE WH_INGEST
+   WAREHOUSE_SIZE = 'XSMALL'
+   AUTO_SUSPEND = 60
+   AUTO_RESUME = TRUE
+   INITIALLY_SUSPENDED = TRUE;
+
+ USE WAREHOUSE WH_INGEST;
+
+-- =========================================================
+-- 01) Database & Schemas
+-- =========================================================
+CREATE OR REPLACE DATABASE RETAILHUB;
+
+CREATE OR REPLACE SCHEMA RETAILHUB.RAW;
+CREATE OR REPLACE SCHEMA RETAILHUB.STG;
+CREATE OR REPLACE SCHEMA RETAILHUB.MART;
+CREATE OR REPLACE SCHEMA RETAILHUB.UTIL;
+
+-- =========================================================
+-- 02) File Formats
+-- =========================================================
+USE SCHEMA RETAILHUB.UTIL;
+
+-- CSV format for sales/customers/products/inventory
+CREATE OR REPLACE FILE FORMAT FF_RETAIL_CSV
+  TYPE = CSV
+  FIELD_DELIMITER = ','
+  SKIP_HEADER = 1
+  FIELD_OPTIONALLY_ENCLOSED_BY = '"'
+  NULL_IF = ('', 'NULL', 'null')
+  EMPTY_FIELD_AS_NULL = TRUE
+  TIMESTAMP_FORMAT = 'AUTO'
+  DATE_FORMAT = 'AUTO'
+  ERROR_ON_COLUMN_COUNT_MISMATCH = FALSE
+  TRIM_SPACE = TRUE;
+
+-- JSON format for campaigns.json
+CREATE OR REPLACE FILE FORMAT FF_RETAIL_JSON
+  TYPE = JSON
+  STRIP_OUTER_ARRAY = TRUE;   -- your campaigns.json is an array of objects
+
+-- =========================================================
+-- 03) Stages (Internal Stage)
+-- =========================================================
+USE SCHEMA RETAILHUB.RAW;
+
+-- Internal named stage: easiest for local upload (PUT) or UI upload
+CREATE OR REPLACE STAGE STG_RETAIL_INTERNAL
+  FILE_FORMAT = RETAILHUB.UTIL.FF_RETAIL_CSV;
+
+-- Separate JSON stage (optional) - keeps formats clean
+CREATE OR REPLACE STAGE STG_RETAIL_JSON_INTERNAL
+  FILE_FORMAT = RETAILHUB.UTIL.FF_RETAIL_JSON;
+
+-- =========================================================
+-- 03b) (Optional Templates) External Stages (S3 / Azure / GCS)
+-- NOTE: These require STORAGE INTEGRATION + cloud configuration.
+-- Keep as template for when you want Snowpipe / Auto-ingest.
+-- =========================================================
+-- -- S3 External Stage Template
+-- CREATE OR REPLACE STAGE STG_RETAIL_S3
+--   URL = 's3://<your-bucket>/retailhub/'
+--   STORAGE_INTEGRATION = <your_storage_integration>
+--   FILE_FORMAT = RETAILHUB.UTIL.FF_RETAIL_CSV;
+
+-- -- Azure External Stage Template
+-- CREATE OR REPLACE STAGE STG_RETAIL_AZURE
+--   URL = 'azure://<account>.blob.core.windows.net/<container>/retailhub/'
+--   STORAGE_INTEGRATION = <your_storage_integration>
+--   FILE_FORMAT = RETAILHUB.UTIL.FF_RETAIL_CSV;
+
+-- -- GCS External Stage Template
+-- CREATE OR REPLACE STAGE STG_RETAIL_GCS
+--   URL = 'gcs://<your-bucket>/retailhub/'
+--   STORAGE_INTEGRATION = <your_storage_integration>
+--   FILE_FORMAT = RETAILHUB.UTIL.FF_RETAIL_CSV;
+
+-- =========================================================
+-- 04) RAW Tables (Landing) - include ingestion metadata columns
+-- =========================================================
+
+-- 04.1 Sales Transactions (CSV)
+CREATE OR REPLACE TABLE SALES_RAW (
+  TRANSACTION_ID         NUMBER,
+  STORE_ID               NUMBER,
+  PRODUCT_ID             NUMBER,
+  CUSTOMER_ID            NUMBER,
+  QUANTITY               NUMBER,
+  UNIT_PRICE             NUMBER(10,2),
+  DISCOUNT               NUMBER(5,2),
+  SALES_TIMESTAMP        TIMESTAMP_NTZ,
+
+  -- Ingestion metadata
+  _LOAD_TS               TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+  _SOURCE_FILE           STRING,
+  _ROW_NUMBER            NUMBER
+);
+
+-- 04.2 Customers (CSV)
+CREATE OR REPLACE TABLE CUSTOMERS_RAW (
+  CUSTOMER_ID            NUMBER,
+  NAME                   STRING,
+  GENDER                 STRING,
+  CONTACT                STRING,
+  LOYALTY_SCORE          NUMBER,
+
+  _LOAD_TS               TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+  _SOURCE_FILE           STRING,
+  _ROW_NUMBER            NUMBER
+);
+
+-- 04.3 Products (CSV)
+CREATE OR REPLACE TABLE PRODUCTS_RAW (
+  PRODUCT_ID             NUMBER,
+  PRODUCT_NAME           STRING,
+  CATEGORY               STRING,
+  SUB_CATEGORY           STRING,
+  COST_PRICE             NUMBER(12,2),
+  SALE_PRICE             NUMBER(12,2),
+
+  _LOAD_TS               TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+  _SOURCE_FILE           STRING,
+  _ROW_NUMBER            NUMBER
+);
+
+-- 04.4 Inventory (CSV)
+CREATE OR REPLACE TABLE INVENTORY_RAW (
+  PRODUCT_ID             NUMBER,
+  STORE_ID               NUMBER,
+  AVAILABLE_QTY          NUMBER,
+  LAST_UPDATED_TIMESTAMP TIMESTAMP_NTZ,
+
+  _LOAD_TS               TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+  _SOURCE_FILE           STRING,
+  _ROW_NUMBER            NUMBER
+);
+
+-- 04.5 Campaigns (JSON) - land as VARIANT for semi-structured processing
+CREATE OR REPLACE TABLE CAMPAIGNS_RAW (
+  CAMPAIGN_PAYLOAD       VARIANT,
+
+  _LOAD_TS               TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+  _SOURCE_FILE           STRING,
+  _ROW_NUMBER            NUMBER
+);
+
+-- =========================================================
+-- 05) Helpful: File Listing / Validation Commands
+-- =========================================================
+ LIST @RETAILHUB.RAW.STG_RETAIL_INTERNAL;
+-- LIST @RETAILHUB.RAW.STG_RETAIL_JSON_INTERNAL;RETAILHUB.RAW.STG_RETAIL_INTERNAL
+
+
+
+-- SALES
+COPY INTO RETAILHUB.RAW.SALES_RAW
+(
+  TRANSACTION_ID, STORE_ID, PRODUCT_ID, CUSTOMER_ID,
+  QUANTITY, UNIT_PRICE, DISCOUNT, SALES_TIMESTAMP,
+  _SOURCE_FILE, _ROW_NUMBER
+)
+FROM (
+  SELECT
+    $1::NUMBER,
+    $2::NUMBER,
+    $3::NUMBER,
+    $4::NUMBER,
+    $5::NUMBER,
+    $6::NUMBER(10,2),
+    $7::NUMBER(5,2),
+    $8::TIMESTAMP_NTZ,
+    METADATA$FILENAME,
+    METADATA$FILE_ROW_NUMBER
+  FROM @RETAILHUB.RAW.STG_RETAIL_INTERNAL/jan/sales.csv
+)
+FILE_FORMAT = (FORMAT_NAME = RETAILHUB.UTIL.FF_RETAIL_CSV)
+ON_ERROR = 'CONTINUE';
+
+-- CUSTOMERS
+COPY INTO RETAILHUB.RAW.CUSTOMERS_RAW
+(
+  CUSTOMER_ID, NAME, GENDER, CONTACT, LOYALTY_SCORE,
+  _SOURCE_FILE, _ROW_NUMBER
+)
+FROM (
+  SELECT
+    $1::NUMBER,
+    $2::STRING,
+    $3::STRING,
+    $4::STRING,
+    $5::NUMBER,
+    METADATA$FILENAME,
+    METADATA$FILE_ROW_NUMBER
+  FROM @RETAILHUB.RAW.STG_RETAIL_INTERNAL/jan/customers.csv
+)
+FILE_FORMAT = (FORMAT_NAME = RETAILHUB.UTIL.FF_RETAIL_CSV)
+ON_ERROR = 'CONTINUE';
+
+-- PRODUCTS
+select * from RETAILHUB.RAW.PRODUCTS_RAW;
+COPY INTO RETAILHUB.RAW.PRODUCTS_RAW
+(
+  PRODUCT_ID, PRODUCT_NAME, CATEGORY, SUB_CATEGORY,
+  COST_PRICE, SALE_PRICE,
+  _SOURCE_FILE, _ROW_NUMBER
+)
+FROM (
+  SELECT
+    $1::NUMBER,
+    $2::STRING,
+    $3::STRING,
+    $4::STRING,
+    $5::NUMBER(12,2),
+    $6::NUMBER(12,2),
+    METADATA$FILENAME,
+    METADATA$FILE_ROW_NUMBER
+  FROM @RETAILHUB.RAW.STG_RETAIL_INTERNAL/jan/products.csv
+)
+FILE_FORMAT = (FORMAT_NAME = RETAILHUB.UTIL.FF_RETAIL_CSV)
+ON_ERROR = 'CONTINUE';
+
+-- INVENTORY
+COPY INTO RETAILHUB.RAW.INVENTORY_RAW
+(
+  PRODUCT_ID, STORE_ID, AVAILABLE_QTY, LAST_UPDATED_TIMESTAMP,
+  _SOURCE_FILE, _ROW_NUMBER
+)
+FROM (
+  SELECT
+    $1::NUMBER,
+    $2::NUMBER,
+    $3::NUMBER,
+    $4::TIMESTAMP_NTZ,
+    METADATA$FILENAME,
+    METADATA$FILE_ROW_NUMBER
+  FROM @RETAILHUB.RAW.STG_RETAIL_INTERNAL/jan/inventory.csv
+)
+FILE_FORMAT = (FORMAT_NAME = RETAILHUB.UTIL.FF_RETAIL_CSV)
+ON_ERROR = 'CONTINUE';
+
+-- SALES
+COPY INTO RETAILHUB.RAW.SALES_RAW
+(
+  TRANSACTION_ID, STORE_ID, PRODUCT_ID, CUSTOMER_ID,
+  QUANTITY, UNIT_PRICE, DISCOUNT, SALES_TIMESTAMP,
+  _SOURCE_FILE, _ROW_NUMBER
+)
+FROM (
+  SELECT
+    $1::NUMBER,
+    $2::NUMBER,
+    $3::NUMBER,
+    $4::NUMBER,
+    $5::NUMBER,
+    $6::NUMBER(10,2),
+    $7::NUMBER(5,2),
+    $8::TIMESTAMP_NTZ,
+    METADATA$FILENAME,
+    METADATA$FILE_ROW_NUMBER
+  FROM @RETAILHUB.RAW.STG_RETAIL_INTERNAL/sales_data.csv
+)
+FILE_FORMAT = (FORMAT_NAME = RETAILHUB.UTIL.FF_RETAIL_CSV)
+ON_ERROR = 'CONTINUE';
+
+-- CUSTOMERS
+COPY INTO RETAILHUB.RAW.CUSTOMERS_RAW
+(
+  CUSTOMER_ID, NAME, GENDER, CONTACT, LOYALTY_SCORE,
+  _SOURCE_FILE, _ROW_NUMBER
+)
+FROM (
+  SELECT
+    $1::NUMBER,
+    $2::STRING,
+    $3::STRING,
+    $4::STRING,
+    $5::NUMBER,
+    METADATA$FILENAME,
+    METADATA$FILE_ROW_NUMBER
+  FROM @RETAILHUB.RAW.STG_RETAIL_INTERNAL/customers.csv
+)
+FILE_FORMAT = (FORMAT_NAME = RETAILHUB.UTIL.FF_RETAIL_CSV)
+ON_ERROR = 'CONTINUE';
+
+-- PRODUCTS
+COPY INTO RETAILHUB.RAW.PRODUCTS_RAW
+(
+  PRODUCT_ID, PRODUCT_NAME, CATEGORY, SUB_CATEGORY,
+  COST_PRICE, SALE_PRICE,
+  _SOURCE_FILE, _ROW_NUMBER
+)
+FROM (
+  SELECT
+    $1::NUMBER,
+    $2::STRING,
+    $3::STRING,
+    $4::STRING,
+    $5::NUMBER(12,2),
+    $6::NUMBER(12,2),
+    METADATA$FILENAME,
+    METADATA$FILE_ROW_NUMBER
+  FROM @RETAILHUB.RAW.STG_RETAIL_INTERNAL/jan/products.csv
+)
+FILE_FORMAT = (FORMAT_NAME = RETAILHUB.UTIL.FF_RETAIL_CSV)
+ON_ERROR = 'CONTINUE';
+
+-- INVENTORY
+COPY INTO RETAILHUB.RAW.INVENTORY_RAW
+(
+  PRODUCT_ID, STORE_ID, AVAILABLE_QTY, LAST_UPDATED_TIMESTAMP,
+  _SOURCE_FILE, _ROW_NUMBER
+)
+FROM (
+  SELECT
+    $1::NUMBER,
+    $2::NUMBER,
+    $3::NUMBER,
+    $4::TIMESTAMP_NTZ,
+    METADATA$FILENAME,
+    METADATA$FILE_ROW_NUMBER
+  FROM @RETAILHUB.RAW.STG_RETAIL_INTERNAL/inventory.csv
+)
+FILE_FORMAT = (FORMAT_NAME = RETAILHUB.UTIL.FF_RETAIL_CSV)
+ON_ERROR = 'CONTINUE';
+
+
+COPY INTO RETAILHUB.RAW.CAMPAIGNS_RAW (CAMPAIGN_PAYLOAD, _SOURCE_FILE, _ROW_NUMBER)
+FROM (
+  SELECT
+    $1::VARIANT,
+    METADATA$FILENAME,
+    METADATA$FILE_ROW_NUMBER
+  FROM @RETAILHUB.RAW.STG_RETAIL_JSON_INTERNAL/jan/campaigns.json
+)
+FILE_FORMAT = (FORMAT_NAME = RETAILHUB.UTIL.FF_RETAIL_JSON)
+ON_ERROR = 'CONTINUE';
+
+
+SELECT COUNT(*) FROM RETAILHUB.RAW.SALES_RAW;
+SELECT COUNT(*) FROM RETAILHUB.RAW.CUSTOMERS_RAW;
+SELECT COUNT(*) FROM RETAILHUB.RAW.PRODUCTS_RAW;
+SELECT COUNT(*) FROM RETAILHUB.RAW.INVENTORY_RAW;
+SELECT COUNT(*) FROM RETAILHUB.RAW.CAMPAIGNS_RAW;
+
+-- Peek at JSON
+SELECT CAMPAIGN_PAYLOAD FROM RETAILHUB.RAW.CAMPAIGNS_RAW LIMIT 5;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
