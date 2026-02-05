@@ -21,10 +21,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Install Snowflake CLI (recommended modern CLI)
-      - name: Install Snowflake CLI
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pipx
         run: |
-          pipx install snowflake-cli-labs
+          python -m pip install --upgrade pip
+          pip install pipx
+          pipx ensurepath
+
+      # Install Snowflake CLI (correct package)
+      - name: Install Snowflake CLI (pipx)
+        run: |
+          pipx install snowflake-cli
+          snow --help
 
       # Write private key from GitHub Secret (base64) into a file
       - name: Configure Snowflake private key
